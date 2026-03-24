@@ -13,7 +13,7 @@ Runpod serverless deployment repo for LTX23 sync AV generation.
 - `HF_TOKEN`
 - `LTX_SERVICE_API_KEY`
 - `RUNPOD_CONTAINER_REGISTRY_AUTH_ID` (optional, required for private GHCR image pull)
-- `RUNPOD_TEMPLATE_ID` (recommended; workflow now uses this to skip GraphQL template upsert)
+- `RUNPOD_TEMPLATE_ID` (optional; if set, workflow skips template upsert and uses this id directly)
 
 ## Service code
 

@@ -95,11 +95,6 @@ jobs:
           if [[ -z "$template_id" ]]; then
             template_id="${{ secrets.RUNPOD_TEMPLATE_ID }}"
           fi
-          if [[ -z "$template_id" ]]; then
-            echo "No template id provided."
-            echo "Set workflow input template_id OR add RUNPOD_TEMPLATE_ID repository secret." >&2
-            exit 1
-          fi
           echo "template_id=$template_id" >> "$GITHUB_OUTPUT"
 
       - name: Build env file
@@ -110,7 +105,7 @@ jobs:
           RUNPOD_TEMPLATE_NAME=ltx23-sync-serverless-h200
           RUNPOD_ENDPOINT_NAME=ltx23-sync-serverless-h200
           RUNPOD_TEMPLATE_ID=${{ steps.template.outputs.template_id }}
-          RUNPOD_SKIP_TEMPLATE_UPSERT=true
+          RUNPOD_SKIP_TEMPLATE_UPSERT=${{ steps.template.outputs.template_id != '' && 'true' || 'false' }}
           RUNPOD_GPU_TYPE="${{ inputs.gpu_type }}"
           RUNPOD_GPU_COUNT=1
           RUNPOD_WORKERS_MIN=${{ inputs.workers_min }}

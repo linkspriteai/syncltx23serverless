@@ -312,127 +312,6 @@ print(json.dumps(payload, separators=(",", ":")))
 PY
 }
 
-graphql_save_template() {
-  local existing_template_id=${1:-}
-  EXISTING_TEMPLATE_ID="$existing_template_id" \
-  APP_ENV_JSON="$APP_ENV_JSON" \
-  python3 - <<'PY'
-import json
-import os
-import sys
-import urllib.error
-import urllib.parse
-import urllib.request
-
-api_key = os.environ["RUNPOD_API_KEY"]
-base_url = "https://api.runpod.io/graphql"
-
-env_obj = json.loads(os.environ["APP_ENV_JSON"])
-env_items = ", ".join(
-    [
-        f'{{ key: {json.dumps(str(k))}, value: {json.dumps(str(v))} }}'
-        for k, v in env_obj.items()
-    ]
-)
-
-fields = []
-existing_id = str(os.getenv("EXISTING_TEMPLATE_ID", "")).strip()
-if existing_id:
-    fields.append(f"id: {json.dumps(existing_id)}")
-fields.append(f'containerDiskInGb: {int(os.getenv("RUNPOD_CONTAINER_DISK_GB", "160"))}')
-fields.append(f'dockerArgs: {json.dumps("python -u backend/app/serverless.py")}')
-fields.append(f"env: [ {env_items} ]")
-fields.append(f'imageName: {json.dumps(os.environ["RUNPOD_IMAGE"])}')
-fields.append("isServerless: true")
-fields.append(f'name: {json.dumps(os.environ["RUNPOD_TEMPLATE_NAME"])}')
-fields.append(
-    f'readme: {json.dumps(os.getenv("RUNPOD_TEMPLATE_README", "LTX23 sync AV serverless worker"))}'
-)
-fields.append("volumeInGb: 0")
-registry_auth_id = str(os.getenv("RUNPOD_CONTAINER_REGISTRY_AUTH_ID", "")).strip()
-if registry_auth_id:
-    fields.append(f"containerRegistryAuthId: {json.dumps(registry_auth_id)}")
-
-query = (
-    "mutation { saveTemplate(input: { "
-    + ", ".join(fields)
-    + " }) { id name isServerless imageName } }"
-)
-
-data = json.dumps({"query": query}).encode("utf-8")
-
-def send_graphql(url: str, headers: dict[str, str]):
-    req = urllib.request.Request(
-        url,
-        data=data,
-        headers=headers,
-        method="POST",
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=60) as resp:
-            return resp.getcode(), resp.read().decode("utf-8")
-    except urllib.error.HTTPError as exc:
-        body = ""
-        try:
-            body = exc.read().decode("utf-8", errors="replace")
-        except Exception:
-            body = "<no response body>"
-        return exc.code, body
-
-modes = [
-    (
-        base_url,
-        {
-            "content-type": "application/json",
-            "Authorization": f"Bearer {api_key}",
-        },
-        "bearer",
-    ),
-    (
-        f"{base_url}?api_key={urllib.parse.quote(api_key, safe='')}",
-        {"content-type": "application/json"},
-        "query_api_key",
-    ),
-]
-
-payload = None
-last_error = ""
-for url, headers, mode in modes:
-    status, body = send_graphql(url, headers)
-    if 200 <= int(status) < 300:
-        try:
-            payload = json.loads(body)
-        except Exception as exc:
-            print(
-                f"Runpod GraphQL saveTemplate invalid JSON in mode={mode}: {exc}; body={body[:800]}",
-                file=sys.stderr,
-            )
-            raise SystemExit(1)
-        break
-    last_error = f"mode={mode} status={status} body={body[:800]}"
-    if int(status) == 403:
-        continue
-    print(f"Runpod GraphQL saveTemplate request failed: {last_error}", file=sys.stderr)
-    raise SystemExit(1)
-
-if payload is None:
-    print(f"Runpod GraphQL saveTemplate request failed: {last_error}", file=sys.stderr)
-    raise SystemExit(1)
-
-if payload.get("errors"):
-    print(f"Runpod GraphQL saveTemplate failed: {payload['errors']}", file=sys.stderr)
-    raise SystemExit(1)
-
-tmpl = payload.get("data", {}).get("saveTemplate") or {}
-template_id = str(tmpl.get("id") or "").strip()
-if not template_id:
-    print(f"Runpod GraphQL saveTemplate missing id: {payload}", file=sys.stderr)
-    raise SystemExit(1)
-
-print(template_id)
-PY
-}
-
 if [[ "$RUNPOD_DRY_RUN" == "true" ]]; then
   echo "Template CREATE payload:"
   echo "$TEMPLATE_CREATE_PAYLOAD" | python3 -m json.tool
@@ -462,10 +341,27 @@ else
   fi
 
   if [[ -z "${TEMPLATE_ID}" ]]; then
-    TEMPLATE_ID=$(graphql_save_template "")
+    if ! CREATED_TEMPLATE_JSON=$(api_call POST /templates "$TEMPLATE_CREATE_PAYLOAD"); then
+      echo "Template create failed via REST. If this is a provider-side restriction, create template once in Runpod UI and pass RUNPOD_TEMPLATE_ID." >&2
+      exit 1
+    fi
+    TEMPLATE_ID=$(python3 - <<'PY' "$CREATED_TEMPLATE_JSON"
+import json, sys
+obj = json.loads(sys.argv[1])
+print(str(obj.get("id", "")).strip())
+PY
+)
+    if [[ -z "$TEMPLATE_ID" ]]; then
+      echo "template create succeeded but no id returned:" >&2
+      echo "$CREATED_TEMPLATE_JSON" >&2
+      exit 1
+    fi
     echo "template created: $TEMPLATE_ID"
   else
-    TEMPLATE_ID=$(graphql_save_template "$TEMPLATE_ID")
+    UPDATED_TEMPLATE_JSON=$(api_call PATCH "/templates/${TEMPLATE_ID}" "$TEMPLATE_UPDATE_PAYLOAD")
+    if [[ -z "${UPDATED_TEMPLATE_JSON:-}" ]]; then
+      echo "template update returned empty payload for id=$TEMPLATE_ID" >&2
+    fi
     echo "template updated: $TEMPLATE_ID"
   fi
 fi
