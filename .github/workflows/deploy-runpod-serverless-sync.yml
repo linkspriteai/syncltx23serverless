@@ -88,6 +88,20 @@ jobs:
             exit 1
           fi
 
+      - name: Resolve template id
+        id: template
+        run: |
+          template_id="${{ inputs.template_id }}"
+          if [[ -z "$template_id" ]]; then
+            template_id="${{ secrets.RUNPOD_TEMPLATE_ID }}"
+          fi
+          if [[ -z "$template_id" ]]; then
+            echo "No template id provided."
+            echo "Set workflow input template_id OR add RUNPOD_TEMPLATE_ID repository secret." >&2
+            exit 1
+          fi
+          echo "template_id=$template_id" >> "$GITHUB_OUTPUT"
+
       - name: Build env file
         run: |
           cat > ltx23-standalone-service/deploy/runpod/.env.runpod.serverless.sync-h200 <<EOF_ENV
@@ -95,8 +109,8 @@ jobs:
           RUNPOD_IMAGE=${{ needs.build-image.outputs.image }}
           RUNPOD_TEMPLATE_NAME=ltx23-sync-serverless-h200
           RUNPOD_ENDPOINT_NAME=ltx23-sync-serverless-h200
-          RUNPOD_TEMPLATE_ID=${{ inputs.template_id }}
-          RUNPOD_SKIP_TEMPLATE_UPSERT=${{ inputs.template_id != '' && 'true' || 'false' }}
+          RUNPOD_TEMPLATE_ID=${{ steps.template.outputs.template_id }}
+          RUNPOD_SKIP_TEMPLATE_UPSERT=true
           RUNPOD_GPU_TYPE="${{ inputs.gpu_type }}"
           RUNPOD_GPU_COUNT=1
           RUNPOD_WORKERS_MIN=${{ inputs.workers_min }}
