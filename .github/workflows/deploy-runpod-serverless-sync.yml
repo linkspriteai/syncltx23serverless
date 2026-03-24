@@ -15,6 +15,10 @@ on:
         description: Serverless maximum workers
         required: true
         default: "1"
+      idle_timeout:
+        description: Idle timeout seconds before scale-down
+        required: true
+        default: "1"
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
@@ -89,7 +93,7 @@ jobs:
           RUNPOD_GPU_COUNT=1
           RUNPOD_WORKERS_MIN=${{ inputs.workers_min }}
           RUNPOD_WORKERS_MAX=${{ inputs.workers_max }}
-          RUNPOD_IDLE_TIMEOUT=5
+          RUNPOD_IDLE_TIMEOUT=${{ inputs.idle_timeout }}
           RUNPOD_EXECUTION_TIMEOUT_MS=1800000
           RUNPOD_SCALER_TYPE=QUEUE_DELAY
           RUNPOD_SCALER_VALUE=1
@@ -144,4 +148,3 @@ jobs:
             -H "Authorization: Bearer ${{ secrets.RUNPOD_API_KEY }}" \
             -H "Content-Type: application/json" \
             --data '{"input":{"healthcheck":true}}'
-
