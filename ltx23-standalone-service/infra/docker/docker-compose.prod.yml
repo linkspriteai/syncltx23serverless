@@ -1,0 +1,43 @@
+version: "3.9"
+
+services:
+  ltx23-standalone-service:
+    runtime: nvidia
+    gpus: all
+    build:
+      context: ../..
+      dockerfile: infra/docker/Dockerfile
+    image: ltx23-standalone-service:latest
+    container_name: ltx23-standalone-service
+    restart: unless-stopped
+    ports:
+      - "13482:8080"
+    environment:
+      SERVICE_API_KEY: ${SERVICE_API_KEY:-replace-me}
+      HF_TOKEN: ${HF_TOKEN:-}
+      DATA_DIR: /data
+      LTX_MODEL_REPO: ${LTX_MODEL_REPO:-Lightricks/LTX-2.3}
+      LTX_MODEL_CHECKPOINT_REPO: ${LTX_MODEL_CHECKPOINT_REPO:-linoyts/ltx-2.3-22b-fused-union-control}
+      LTX_MODEL_CHECKPOINT_DISTILLED: ${LTX_MODEL_CHECKPOINT_DISTILLED:-ltx-2.3-22b-fused-union-control.safetensors}
+      LTX_MODEL_CHECKPOINT_FULL: ${LTX_MODEL_CHECKPOINT_FULL:-ltx-2.3-22b-dev-fp8.safetensors}
+      LTX_DEFAULT_MODEL_VARIANT: ${LTX_DEFAULT_MODEL_VARIANT:-distilled}
+      LTX_DISTILLED_USE_FP8_CAST: ${LTX_DISTILLED_USE_FP8_CAST:-false}
+      LTX_FULL_USE_FP8_CAST: ${LTX_FULL_USE_FP8_CAST:-false}
+      LTX_SYNC_FORCE_DISTILLED: ${LTX_SYNC_FORCE_DISTILLED:-true}
+      LTX_SYNC_ASSUME_FUSED_CHECKPOINT: ${LTX_SYNC_ASSUME_FUSED_CHECKPOINT:-true}
+      LTX_SYNC_IC_LORA_REPO: ${LTX_SYNC_IC_LORA_REPO:-Lightricks/LTX-2.3-22b-IC-LoRA-Union-Control}
+      LTX_SYNC_IC_LORA_FILENAME: ${LTX_SYNC_IC_LORA_FILENAME:-ltx-2.3-22b-ic-lora-union-control-ref0.5.safetensors}
+      LTX_SYNC_REFERENCE_DOWNSCALE_FACTOR: ${LTX_SYNC_REFERENCE_DOWNSCALE_FACTOR:-2}
+      LTX_SYNC_VIDEO_PREPROCESS_MODE: ${LTX_SYNC_VIDEO_PREPROCESS_MODE:-pose_dwpose}
+      LTX_PRELOAD_ON_START: ${LTX_PRELOAD_ON_START:-true}
+      LTX_LOCAL_CHECKPOINTS_DIR: ${LTX_LOCAL_CHECKPOINTS_DIR:-/data/models/checkpoints}
+    volumes:
+      - /mnt/data1/ltx23-standalone:/data
+      - /mnt/data1/hf_cache:/root/.cache/huggingface
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]

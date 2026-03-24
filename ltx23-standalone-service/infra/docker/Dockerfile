@@ -1,0 +1,50 @@
+FROM pytorch/pytorch:2.8.0-cuda12.8-cudnn9-runtime
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PYTHONUNBUFFERED=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    TORCH_COMPILE_DISABLE=1 \
+    TORCHDYNAMO_DISABLE=1 \
+    CC=/usr/bin/gcc \
+    CXX=/usr/bin/g++
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    ffmpeg \
+    git \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+COPY pyproject.toml /app/pyproject.toml
+RUN pip install --no-cache-dir \
+    'fastapi>=0.115.0,<1.0.0' \
+    'uvicorn[standard]>=0.30.0,<1.0.0' \
+    'pydantic-settings>=2.4.0,<3.0.0' \
+    'python-multipart>=0.0.9,<1.0.0' \
+    'huggingface_hub>=0.25.0,<1.0.0' \
+    'transformers>=4.57.0' \
+    'einops>=0.8.0' \
+    'scipy>=1.13.0' \
+    'av>=12.0.0' \
+    'imageio[ffmpeg]>=2.36.0' \
+    'opencv-python-headless>=4.11.0' \
+    'scikit-image>=0.25.2' \
+    'matplotlib>=3.9.0' \
+    'dwpose' \
+    'onnxruntime-gpu' \
+    'num2words>=0.5.14' \
+    'safetensors>=0.4.5' \
+    'flashpack==0.1.2'
+
+RUN git clone --depth 1 https://github.com/Lightricks/LTX-2.git /opt/LTX-2
+RUN pip install --no-cache-dir --no-deps -e /opt/LTX-2/packages/ltx-core -e /opt/LTX-2/packages/ltx-pipelines
+RUN pip install --no-cache-dir xformers==0.0.32.post2 --no-build-isolation || true
+
+COPY backend /app/backend
+
+ENV PYTHONPATH=/app/backend:/opt/LTX-2/packages/ltx-core/src:/opt/LTX-2/packages/ltx-pipelines/src
+
+EXPOSE 8080
+
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8080"]

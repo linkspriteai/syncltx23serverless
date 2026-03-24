@@ -1,0 +1,147 @@
+name: Deploy Runpod Serverless Sync LTX23
+
+on:
+  workflow_dispatch:
+    inputs:
+      gpu_type:
+        description: Runpod GPU type label or id
+        required: true
+        default: NVIDIA H200
+      workers_min:
+        description: Serverless minimum workers
+        required: true
+        default: "0"
+      workers_max:
+        description: Serverless maximum workers
+        required: true
+        default: "1"
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  build-image:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      image: ${{ steps.meta.outputs.image }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Docker metadata
+        id: meta
+        run: |
+          owner=$(echo "${GITHUB_REPOSITORY_OWNER}" | tr '[:upper:]' '[:lower:]')
+          image="ghcr.io/${owner}/ltx23-sync:${GITHUB_SHA}"
+          echo "image=${image}" >> "$GITHUB_OUTPUT"
+          echo "latest=ghcr.io/${owner}/ltx23-sync:latest" >> "$GITHUB_OUTPUT"
+          echo "sync_h200=ghcr.io/${owner}/ltx23-sync:sync-h200" >> "$GITHUB_OUTPUT"
+          echo "Using image: ${image}"
+
+      - name: Login GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: ./ltx23-standalone-service
+          file: ./ltx23-standalone-service/infra/docker/Dockerfile.serverless
+          push: true
+          tags: |
+            ${{ steps.meta.outputs.image }}
+            ${{ steps.meta.outputs.latest }}
+            ${{ steps.meta.outputs.sync_h200 }}
+
+  deploy-serverless:
+    runs-on: ubuntu-latest
+    needs: [build-image]
+    permissions:
+      contents: read
+    outputs:
+      endpoint_id: ${{ steps.deploy.outputs.endpoint_id }}
+      runsync_url: ${{ steps.deploy.outputs.runsync_url }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Validate required secrets
+        run: |
+          if [[ -z "${{ secrets.RUNPOD_API_KEY }}" || -z "${{ secrets.HF_TOKEN }}" || -z "${{ secrets.LTX_SERVICE_API_KEY }}" ]]; then
+            echo "Missing one of required secrets: RUNPOD_API_KEY, HF_TOKEN, LTX_SERVICE_API_KEY" >&2
+            exit 1
+          fi
+
+      - name: Build env file
+        run: |
+          cat > ltx23-standalone-service/deploy/runpod/.env.runpod.serverless.sync-h200 <<EOF_ENV
+          RUNPOD_API_KEY=${{ secrets.RUNPOD_API_KEY }}
+          RUNPOD_IMAGE=${{ needs.build-image.outputs.image }}
+          RUNPOD_TEMPLATE_NAME=ltx23-sync-serverless-h200
+          RUNPOD_ENDPOINT_NAME=ltx23-sync-serverless-h200
+          RUNPOD_GPU_TYPE=${{ inputs.gpu_type }}
+          RUNPOD_GPU_COUNT=1
+          RUNPOD_WORKERS_MIN=${{ inputs.workers_min }}
+          RUNPOD_WORKERS_MAX=${{ inputs.workers_max }}
+          RUNPOD_IDLE_TIMEOUT=5
+          RUNPOD_EXECUTION_TIMEOUT_MS=1800000
+          RUNPOD_SCALER_TYPE=QUEUE_DELAY
+          RUNPOD_SCALER_VALUE=1
+          RUNPOD_FLASHBOOT=true
+          RUNPOD_ALLOWED_CUDA=13.0
+          RUNPOD_MIN_CUDA_VERSION=13.0
+          RUNPOD_CONTAINER_DISK_GB=160
+          RUNPOD_VOLUME_GB=500
+          RUNPOD_VOLUME_MOUNT_PATH=/workspace
+          RUNPOD_TEMPLATE_CATEGORY=NVIDIA
+          RUNPOD_CONTAINER_REGISTRY_AUTH_ID=${{ secrets.RUNPOD_CONTAINER_REGISTRY_AUTH_ID }}
+
+          SERVICE_API_KEY=${{ secrets.LTX_SERVICE_API_KEY }}
+          HF_TOKEN=${{ secrets.HF_TOKEN }}
+          DATA_DIR=/workspace/data
+          FRAME_COUNT_MAX=97
+          LTX_ENABLE_STANDARD_AV=false
+          LTX_ENABLE_SYNC_AV=true
+          LTX_PRELOAD_ON_START=true
+          LTX_DEFAULT_MODEL_VARIANT=distilled
+          LTX_MODEL_REPO=Lightricks/LTX-2.3
+          LTX_MODEL_CHECKPOINT_REPO=linoyts/ltx-2.3-22b-fused-union-control
+          LTX_MODEL_CHECKPOINT_DISTILLED=ltx-2.3-22b-fused-union-control.safetensors
+          LTX_MODEL_CHECKPOINT_FULL=ltx-2.3-22b-fused-union-control.safetensors
+          LTX_MODEL_DISTILLED_LORA=ltx-2.3-22b-distilled-lora-384.safetensors
+          LTX_MODEL_SPATIAL_UPSAMPLER=ltx-2.3-spatial-upscaler-x2-1.1.safetensors
+          LTX_DISTILLED_USE_FP8_CAST=true
+          LTX_FULL_USE_FP8_CAST=false
+          LTX_SYNC_FORCE_DISTILLED=true
+          LTX_SYNC_ASSUME_FUSED_CHECKPOINT=true
+          LTX_SYNC_PRE_HOPPER_FALLBACK_ENABLED=false
+          LTX_SYNC_IC_LORA_REPO=Lightricks/LTX-2.3-22b-IC-LoRA-Union-Control
+          LTX_SYNC_IC_LORA_FILENAME=ltx-2.3-22b-ic-lora-union-control-ref0.5.safetensors
+          LTX_SYNC_REFERENCE_DOWNSCALE_FACTOR=2
+          LTX_SYNC_VIDEO_PREPROCESS_MODE=pose_dwpose
+          EOF_ENV
+
+      - name: Create/update Runpod serverless endpoint
+        id: deploy
+        run: |
+          chmod +x ltx23-standalone-service/deploy/runpod/create_or_update_serverless_endpoint.sh
+          ltx23-standalone-service/deploy/runpod/create_or_update_serverless_endpoint.sh \
+            ltx23-standalone-service/deploy/runpod/.env.runpod.serverless.sync-h200
+
+      - name: Smoke test runsync healthcheck
+        run: |
+          if [[ -z "${{ steps.deploy.outputs.runsync_url }}" ]]; then
+            echo "runsync_url is empty from deploy step" >&2
+            exit 1
+          fi
+          curl -sS -X POST "${{ steps.deploy.outputs.runsync_url }}" \
+            -H "Authorization: Bearer ${{ secrets.RUNPOD_API_KEY }}" \
+            -H "Content-Type: application/json" \
+            --data '{"input":{"healthcheck":true}}'
+

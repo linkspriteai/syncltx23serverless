@@ -1,0 +1,30 @@
+[project]
+name = "ltx23-standalone-service"
+version = "0.1.0"
+description = "Standalone LTX-2.3 HTTP service without ComfyUI"
+requires-python = ">=3.11"
+dependencies = [
+  "fastapi>=0.115.0,<1.0.0",
+  "uvicorn[standard]>=0.30.0,<1.0.0",
+  "pydantic-settings>=2.4.0,<3.0.0",
+  "python-multipart>=0.0.9,<1.0.0",
+  "huggingface_hub>=0.25.0,<1.0.0",
+  "torch>=2.8.0",
+  "torchaudio>=2.8.0",
+  "transformers>=4.57.0",
+  "einops>=0.8.0",
+  "scipy>=1.13.0",
+  "av>=12.0.0",
+  "imageio[ffmpeg]>=2.36.0",
+  "opencv-python-headless>=4.11.0",
+  "scikit-image>=0.25.2",
+  "matplotlib>=3.9.0",
+  "dwpose",
+  "onnxruntime-gpu",
+  "num2words>=0.5.14",
+  "safetensors>=0.4.5",
+  "flashpack==0.1.2",
+]
+
+[tool.setuptools]
+packages = []
