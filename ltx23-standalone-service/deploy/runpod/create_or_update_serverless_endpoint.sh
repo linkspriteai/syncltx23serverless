@@ -319,10 +319,12 @@ graphql_save_template() {
 import json
 import os
 import sys
+import urllib.error
+import urllib.parse
 import urllib.request
 
 api_key = os.environ["RUNPOD_API_KEY"]
-url = f"https://api.runpod.io/graphql?api_key={api_key}"
+base_url = "https://api.runpod.io/graphql"
 
 env_obj = json.loads(os.environ["APP_ENV_JSON"])
 env_items = ", ".join(
@@ -356,14 +358,65 @@ query = (
     + " }) { id name isServerless imageName } }"
 )
 
-req = urllib.request.Request(
-    url,
-    data=json.dumps({"query": query}).encode("utf-8"),
-    headers={"content-type": "application/json"},
-    method="POST",
-)
-with urllib.request.urlopen(req, timeout=60) as resp:
-    payload = json.loads(resp.read().decode("utf-8"))
+data = json.dumps({"query": query}).encode("utf-8")
+
+def send_graphql(url: str, headers: dict[str, str]):
+    req = urllib.request.Request(
+        url,
+        data=data,
+        headers=headers,
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            return resp.getcode(), resp.read().decode("utf-8")
+    except urllib.error.HTTPError as exc:
+        body = ""
+        try:
+            body = exc.read().decode("utf-8", errors="replace")
+        except Exception:
+            body = "<no response body>"
+        return exc.code, body
+
+modes = [
+    (
+        base_url,
+        {
+            "content-type": "application/json",
+            "Authorization": f"Bearer {api_key}",
+        },
+        "bearer",
+    ),
+    (
+        f"{base_url}?api_key={urllib.parse.quote(api_key, safe='')}",
+        {"content-type": "application/json"},
+        "query_api_key",
+    ),
+]
+
+payload = None
+last_error = ""
+for url, headers, mode in modes:
+    status, body = send_graphql(url, headers)
+    if 200 <= int(status) < 300:
+        try:
+            payload = json.loads(body)
+        except Exception as exc:
+            print(
+                f"Runpod GraphQL saveTemplate invalid JSON in mode={mode}: {exc}; body={body[:800]}",
+                file=sys.stderr,
+            )
+            raise SystemExit(1)
+        break
+    last_error = f"mode={mode} status={status} body={body[:800]}"
+    if int(status) == 403:
+        continue
+    print(f"Runpod GraphQL saveTemplate request failed: {last_error}", file=sys.stderr)
+    raise SystemExit(1)
+
+if payload is None:
+    print(f"Runpod GraphQL saveTemplate request failed: {last_error}", file=sys.stderr)
+    raise SystemExit(1)
 
 if payload.get("errors"):
     print(f"Runpod GraphQL saveTemplate failed: {payload['errors']}", file=sys.stderr)
