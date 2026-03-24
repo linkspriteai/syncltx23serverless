@@ -142,6 +142,8 @@ payload = {
     "isServerless": True,
     "category": os.getenv("RUNPOD_TEMPLATE_CATEGORY", "NVIDIA"),
     "containerDiskInGb": int(os.getenv("RUNPOD_CONTAINER_DISK_GB", "160")),
+    # Runpod serverless template API may default this when omitted; enforce zero.
+    "volumeInGb": 0,
     "dockerStartCmd": ["python", "-u", "backend/app/serverless.py"],
     "readme": os.getenv("RUNPOD_TEMPLATE_README", "LTX23 sync AV serverless worker"),
     "env": json.loads(os.environ["APP_ENV_JSON"]),
@@ -164,6 +166,8 @@ payload = {
     "name": os.environ["RUNPOD_TEMPLATE_NAME"],
     "imageName": os.environ["RUNPOD_IMAGE"],
     "containerDiskInGb": int(os.getenv("RUNPOD_CONTAINER_DISK_GB", "160")),
+    # Keep zero during update to avoid server-side defaulting to unsupported value.
+    "volumeInGb": 0,
     "dockerStartCmd": ["python", "-u", "backend/app/serverless.py"],
     "readme": os.getenv("RUNPOD_TEMPLATE_README", "LTX23 sync AV serverless worker"),
     "env": json.loads(os.environ["APP_ENV_JSON"]),
