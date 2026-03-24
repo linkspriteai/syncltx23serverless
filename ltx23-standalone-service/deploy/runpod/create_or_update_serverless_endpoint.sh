@@ -54,15 +54,44 @@ api_call() {
   local path=$2
   local body=${3:-}
   local url="${API_BASE}${path}"
-  if [[ -n "$body" ]]; then
-    curl -fsS -X "$method" "$url" \
-      -H "Authorization: Bearer $RUNPOD_API_KEY" \
-      -H "Content-Type: application/json" \
-      --data "$body"
-  else
-    curl -fsS -X "$method" "$url" \
-      -H "Authorization: Bearer $RUNPOD_API_KEY"
-  fi
+  local attempts=${RUNPOD_API_RETRIES:-3}
+  local sleep_s=${RUNPOD_API_RETRY_SLEEP_SECONDS:-2}
+  local attempt=1
+
+  while (( attempt <= attempts )); do
+    local tmp
+    tmp=$(mktemp)
+    local status
+    if [[ -n "$body" ]]; then
+      status=$(curl -sS -o "$tmp" -w "%{http_code}" -X "$method" "$url" \
+        -H "Authorization: Bearer $RUNPOD_API_KEY" \
+        -H "Content-Type: application/json" \
+        --data "$body")
+    else
+      status=$(curl -sS -o "$tmp" -w "%{http_code}" -X "$method" "$url" \
+        -H "Authorization: Bearer $RUNPOD_API_KEY")
+    fi
+
+    if [[ "$status" =~ ^2[0-9][0-9]$ ]]; then
+      cat "$tmp"
+      rm -f "$tmp"
+      return 0
+    fi
+
+    if [[ "$status" =~ ^5[0-9][0-9]$ && $attempt -lt $attempts ]]; then
+      echo "Runpod API transient error status=$status method=$method path=$path (attempt $attempt/$attempts), retrying..." >&2
+      rm -f "$tmp"
+      sleep "$sleep_s"
+      attempt=$((attempt + 1))
+      continue
+    fi
+
+    echo "Runpod API request failed status=$status method=$method path=$path" >&2
+    echo "Runpod response body:" >&2
+    cat "$tmp" >&2
+    rm -f "$tmp"
+    return 1
+  done
 }
 
 CSV_SPLIT_SCRIPT='
@@ -94,7 +123,7 @@ GPU_TYPE_IDS_JSON=$(python3 -c "$CSV_SPLIT_SCRIPT" "${RUNPOD_GPU_TYPE_IDS:-$RUNP
 DATA_CENTER_IDS_JSON=$(python3 -c "$CSV_SPLIT_SCRIPT" "${RUNPOD_DATA_CENTER_IDS:-}")
 ALLOWED_CUDA_JSON=$(python3 -c "$CSV_SPLIT_SCRIPT" "${RUNPOD_ALLOWED_CUDA:-}")
 
-TEMPLATE_PAYLOAD=$(APP_ENV_JSON="$APP_ENV_JSON" \
+TEMPLATE_CREATE_PAYLOAD=$(APP_ENV_JSON="$APP_ENV_JSON" \
 GPU_TYPE_IDS_JSON="$GPU_TYPE_IDS_JSON" \
 DATA_CENTER_IDS_JSON="$DATA_CENTER_IDS_JSON" \
 ALLOWED_CUDA_JSON="$ALLOWED_CUDA_JSON" \
@@ -128,7 +157,31 @@ print(json.dumps(payload, separators=(",", ":")))
 PY
 )
 
-ENDPOINT_PAYLOAD_BASE=$(GPU_TYPE_IDS_JSON="$GPU_TYPE_IDS_JSON" \
+TEMPLATE_UPDATE_PAYLOAD=$(APP_ENV_JSON="$APP_ENV_JSON" \
+python3 - <<'PY'
+import json
+import os
+
+payload = {
+    "name": os.environ["RUNPOD_TEMPLATE_NAME"],
+    "imageName": os.environ["RUNPOD_IMAGE"],
+    "containerDiskInGb": int(os.getenv("RUNPOD_CONTAINER_DISK_GB", "160")),
+    "volumeInGb": int(os.getenv("RUNPOD_VOLUME_GB", "500")),
+    "volumeMountPath": os.getenv("RUNPOD_VOLUME_MOUNT_PATH", "/workspace"),
+    "dockerStartCmd": ["python", "-u", "backend/app/serverless.py"],
+    "readme": os.getenv("RUNPOD_TEMPLATE_README", "LTX23 sync AV serverless worker"),
+    "env": json.loads(os.environ["APP_ENV_JSON"]),
+}
+
+registry_auth_id = str(os.getenv("RUNPOD_CONTAINER_REGISTRY_AUTH_ID", "")).strip()
+if registry_auth_id:
+    payload["containerRegistryAuthId"] = registry_auth_id
+
+print(json.dumps(payload, separators=(",", ":")))
+PY
+)
+
+ENDPOINT_CREATE_PAYLOAD_BASE=$(GPU_TYPE_IDS_JSON="$GPU_TYPE_IDS_JSON" \
 DATA_CENTER_IDS_JSON="$DATA_CENTER_IDS_JSON" \
 ALLOWED_CUDA_JSON="$ALLOWED_CUDA_JSON" \
 python3 - <<'PY'
@@ -143,6 +196,55 @@ def to_bool(v: str, default=False):
 payload = {
     "name": os.environ["RUNPOD_ENDPOINT_NAME"],
     "computeType": os.getenv("RUNPOD_COMPUTE_TYPE", "GPU"),
+    "gpuCount": int(os.getenv("RUNPOD_GPU_COUNT", "1")),
+    "gpuTypeIds": json.loads(os.environ["GPU_TYPE_IDS_JSON"]),
+    "workersMin": int(os.getenv("RUNPOD_WORKERS_MIN", "0")),
+    "workersMax": int(os.getenv("RUNPOD_WORKERS_MAX", "1")),
+    "idleTimeout": int(os.getenv("RUNPOD_IDLE_TIMEOUT", "5")),
+    "executionTimeoutMs": int(os.getenv("RUNPOD_EXECUTION_TIMEOUT_MS", "1800000")),
+    "scalerType": os.getenv("RUNPOD_SCALER_TYPE", "QUEUE_DELAY"),
+    "scalerValue": int(os.getenv("RUNPOD_SCALER_VALUE", "1")),
+    "flashboot": to_bool(os.getenv("RUNPOD_FLASHBOOT", "true"), True),
+}
+
+allowed_cuda = json.loads(os.environ["ALLOWED_CUDA_JSON"])
+if allowed_cuda:
+    payload["allowedCudaVersions"] = allowed_cuda
+
+min_cuda = str(os.getenv("RUNPOD_MIN_CUDA_VERSION", "")).strip()
+if min_cuda:
+    payload["minCudaVersion"] = min_cuda
+
+network_volume_id = str(os.getenv("RUNPOD_NETWORK_VOLUME_ID", "")).strip()
+if network_volume_id:
+    payload["networkVolumeId"] = network_volume_id
+
+data_centers = json.loads(os.environ["DATA_CENTER_IDS_JSON"])
+if data_centers:
+    payload["dataCenterIds"] = data_centers
+
+vcpu_count = str(os.getenv("RUNPOD_VCPU_COUNT", "")).strip()
+if vcpu_count:
+    payload["vcpuCount"] = int(vcpu_count)
+
+print(json.dumps(payload, separators=(",", ":")))
+PY
+)
+
+ENDPOINT_UPDATE_PAYLOAD_BASE=$(GPU_TYPE_IDS_JSON="$GPU_TYPE_IDS_JSON" \
+DATA_CENTER_IDS_JSON="$DATA_CENTER_IDS_JSON" \
+ALLOWED_CUDA_JSON="$ALLOWED_CUDA_JSON" \
+python3 - <<'PY'
+import json
+import os
+
+def to_bool(v: str, default=False):
+    if v is None:
+        return default
+    return str(v).strip().lower() in {"1", "true", "yes", "y", "on"}
+
+payload = {
+    "name": os.environ["RUNPOD_ENDPOINT_NAME"],
     "gpuCount": int(os.getenv("RUNPOD_GPU_COUNT", "1")),
     "gpuTypeIds": json.loads(os.environ["GPU_TYPE_IDS_JSON"]),
     "workersMin": int(os.getenv("RUNPOD_WORKERS_MIN", "0")),
@@ -210,11 +312,17 @@ PY
 }
 
 if [[ "$RUNPOD_DRY_RUN" == "true" ]]; then
-  echo "Template payload:"
-  echo "$TEMPLATE_PAYLOAD" | python3 -m json.tool
+  echo "Template CREATE payload:"
+  echo "$TEMPLATE_CREATE_PAYLOAD" | python3 -m json.tool
   echo
-  echo "Endpoint payload base:"
-  echo "$ENDPOINT_PAYLOAD_BASE" | python3 -m json.tool
+  echo "Template UPDATE payload:"
+  echo "$TEMPLATE_UPDATE_PAYLOAD" | python3 -m json.tool
+  echo
+  echo "Endpoint CREATE payload base:"
+  echo "$ENDPOINT_CREATE_PAYLOAD_BASE" | python3 -m json.tool
+  echo
+  echo "Endpoint UPDATE payload base:"
+  echo "$ENDPOINT_UPDATE_PAYLOAD_BASE" | python3 -m json.tool
   exit 0
 fi
 
@@ -225,7 +333,7 @@ if [[ -z "${TEMPLATE_ID}" ]]; then
 fi
 
 if [[ -z "${TEMPLATE_ID}" ]]; then
-  CREATED_TEMPLATE_JSON=$(api_call POST /templates "$TEMPLATE_PAYLOAD")
+  CREATED_TEMPLATE_JSON=$(api_call POST /templates "$TEMPLATE_CREATE_PAYLOAD")
   TEMPLATE_ID=$(python3 - <<'PY' "$CREATED_TEMPLATE_JSON"
 import json, sys
 obj = json.loads(sys.argv[1])
@@ -239,7 +347,7 @@ PY
   fi
   echo "template created: $TEMPLATE_ID"
 else
-  UPDATED_TEMPLATE_JSON=$(api_call PATCH "/templates/${TEMPLATE_ID}" "$TEMPLATE_PAYLOAD")
+  UPDATED_TEMPLATE_JSON=$(api_call PATCH "/templates/${TEMPLATE_ID}" "$TEMPLATE_UPDATE_PAYLOAD")
   echo "template updated: $TEMPLATE_ID"
   if [[ -n "${UPDATED_TEMPLATE_JSON:-}" ]]; then
     true
@@ -252,10 +360,11 @@ if [[ -z "${ENDPOINT_ID}" ]]; then
   ENDPOINT_ID=$(find_id_by_name "$ENDPOINTS_JSON" "$RUNPOD_ENDPOINT_NAME")
 fi
 
-ENDPOINT_PAYLOAD=$(merge_with_template_id "$ENDPOINT_PAYLOAD_BASE" "$TEMPLATE_ID")
+ENDPOINT_CREATE_PAYLOAD=$(merge_with_template_id "$ENDPOINT_CREATE_PAYLOAD_BASE" "$TEMPLATE_ID")
+ENDPOINT_UPDATE_PAYLOAD=$(merge_with_template_id "$ENDPOINT_UPDATE_PAYLOAD_BASE" "$TEMPLATE_ID")
 
 if [[ -z "${ENDPOINT_ID}" ]]; then
-  CREATED_ENDPOINT_JSON=$(api_call POST /endpoints "$ENDPOINT_PAYLOAD")
+  CREATED_ENDPOINT_JSON=$(api_call POST /endpoints "$ENDPOINT_CREATE_PAYLOAD")
   ENDPOINT_ID=$(python3 - <<'PY' "$CREATED_ENDPOINT_JSON"
 import json, sys
 obj = json.loads(sys.argv[1])
@@ -269,7 +378,7 @@ PY
   fi
   echo "endpoint created: $ENDPOINT_ID"
 else
-  UPDATED_ENDPOINT_JSON=$(api_call PATCH "/endpoints/${ENDPOINT_ID}" "$ENDPOINT_PAYLOAD")
+  UPDATED_ENDPOINT_JSON=$(api_call PATCH "/endpoints/${ENDPOINT_ID}" "$ENDPOINT_UPDATE_PAYLOAD")
   echo "endpoint updated: $ENDPOINT_ID"
   if [[ -n "${UPDATED_ENDPOINT_JSON:-}" ]]; then
     true
