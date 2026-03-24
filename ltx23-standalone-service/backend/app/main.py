@@ -845,7 +845,8 @@ class PipelineRuntime:
                         },
                     }
                 except Exception as exc:
-                    if _is_cuda_oom_error(exc) and attempt_index < len(attempts):
+                    should_retry = _is_cuda_oom_error(exc) and attempt_index < len(attempts)
+                    if should_retry:
                         logger.warning(
                             "Sync parity OOM at attempt=%s/%s (%sx%s frames=%s); retrying fallback profile",
                             attempt_index,
@@ -854,6 +855,9 @@ class PipelineRuntime:
                             attempt_height,
                             attempt_frames,
                         )
+                        # Release traceback references before CUDA cleanup so retry
+                        # can reclaim memory from failed tensors.
+                        del exc
                         _best_effort_cuda_cleanup()
                         continue
                     raise
@@ -1210,244 +1214,245 @@ class HFStyleSyncPipeline:
         from ltx_pipelines.utils.media_io import decode_audio_from_file
 
         assert_resolution(height=height, width=width, is_two_stage=True)
-        sync_prompt = f"{str(prompt or '').strip()} synchronized lipsync".strip()
+        with torch.inference_mode():
+            sync_prompt = f"{str(prompt or '').strip()} synchronized lipsync".strip()
 
-        generator = torch.Generator(device=self.device).manual_seed(int(seed))
-        noiser = GaussianNoiser(generator=generator)
-        stepper = EulerDiffusionStep()
-        stage_1_model_ledger = self._ensure_stage_1_model_ledger()
-        stage_2_model_ledger = None
+            generator = torch.Generator(device=self.device).manual_seed(int(seed))
+            noiser = GaussianNoiser(generator=generator)
+            stepper = EulerDiffusionStep()
+            stage_1_model_ledger = self._ensure_stage_1_model_ledger()
+            stage_2_model_ledger = None
 
-        (ctx_p,) = encode_prompts(
-            [sync_prompt],
-            stage_1_model_ledger,
-            enhance_first_prompt=bool(enhance_prompt),
-            enhance_prompt_image=images[0].path if images else None,
-        )
-        video_context, audio_context = ctx_p.video_encoding, ctx_p.audio_encoding
-
-        has_audio = bool(audio_path)
-        encoded_audio_latent = None
-        decoded_audio_for_output = None
-        if has_audio:
-            video_duration = float(num_frames) / float(frame_rate)
-            decoded_audio = decode_audio_from_file(audio_path, self.device, 0.0, video_duration)
-            if decoded_audio is None:
-                raise ValueError(f"Could not decode audio stream from {audio_path}")
-
-            encoded_audio_latent = vae_encode_audio(
-                decoded_audio,
-                stage_1_model_ledger.audio_encoder(),
+            (ctx_p,) = encode_prompts(
+                [sync_prompt],
+                stage_1_model_ledger,
+                enhance_first_prompt=bool(enhance_prompt),
+                enhance_prompt_image=images[0].path if images else None,
             )
-            audio_shape = AudioLatentShape.from_duration(
-                batch=1,
-                duration=video_duration,
-                channels=8,
-                mel_bins=16,
-            )
-            expected_frames = int(audio_shape.frames)
-            actual_frames = int(encoded_audio_latent.shape[2])
-            if actual_frames > expected_frames:
-                encoded_audio_latent = encoded_audio_latent[:, :, :expected_frames, :]
-            elif actual_frames < expected_frames:
-                pad = torch.zeros(
-                    encoded_audio_latent.shape[0],
-                    encoded_audio_latent.shape[1],
-                    expected_frames - actual_frames,
-                    encoded_audio_latent.shape[3],
-                    device=encoded_audio_latent.device,
-                    dtype=encoded_audio_latent.dtype,
+            video_context, audio_context = ctx_p.video_encoding, ctx_p.audio_encoding
+
+            has_audio = bool(audio_path)
+            encoded_audio_latent = None
+            decoded_audio_for_output = None
+            if has_audio:
+                video_duration = float(num_frames) / float(frame_rate)
+                decoded_audio = decode_audio_from_file(audio_path, self.device, 0.0, video_duration)
+                if decoded_audio is None:
+                    raise ValueError(f"Could not decode audio stream from {audio_path}")
+
+                encoded_audio_latent = vae_encode_audio(
+                    decoded_audio,
+                    stage_1_model_ledger.audio_encoder(),
                 )
-                encoded_audio_latent = torch.cat([encoded_audio_latent, pad], dim=2)
-            decoded_audio_for_output = Audio(
-                waveform=decoded_audio.waveform.squeeze(0),
-                sampling_rate=decoded_audio.sampling_rate,
-            )
+                audio_shape = AudioLatentShape.from_duration(
+                    batch=1,
+                    duration=video_duration,
+                    channels=8,
+                    mel_bins=16,
+                )
+                expected_frames = int(audio_shape.frames)
+                actual_frames = int(encoded_audio_latent.shape[2])
+                if actual_frames > expected_frames:
+                    encoded_audio_latent = encoded_audio_latent[:, :, :expected_frames, :]
+                elif actual_frames < expected_frames:
+                    pad = torch.zeros(
+                        encoded_audio_latent.shape[0],
+                        encoded_audio_latent.shape[1],
+                        expected_frames - actual_frames,
+                        encoded_audio_latent.shape[3],
+                        device=encoded_audio_latent.device,
+                        dtype=encoded_audio_latent.dtype,
+                    )
+                    encoded_audio_latent = torch.cat([encoded_audio_latent, pad], dim=2)
+                decoded_audio_for_output = Audio(
+                    waveform=decoded_audio.waveform.squeeze(0),
+                    sampling_rate=decoded_audio.sampling_rate,
+                )
 
-        stage_1_output_shape = VideoPixelShape(
-            batch=1,
-            frames=int(num_frames),
-            width=int(width) // 2,
-            height=int(height) // 2,
-            fps=float(frame_rate),
-        )
-        video_encoder = stage_1_model_ledger.video_encoder()
-        stage_1_conditionings = combined_image_conditionings(
-            images=images,
-            height=stage_1_output_shape.height,
-            width=stage_1_output_shape.width,
-            video_encoder=video_encoder,
-            dtype=self.dtype,
-            device=self.device,
-        )
-        stage_1_conditionings.extend(
-            self._create_ic_conditionings(
-                video_conditioning=video_conditioning,
+            stage_1_output_shape = VideoPixelShape(
+                batch=1,
+                frames=int(num_frames),
+                width=int(width) // 2,
+                height=int(height) // 2,
+                fps=float(frame_rate),
+            )
+            video_encoder = stage_1_model_ledger.video_encoder()
+            stage_1_conditionings = combined_image_conditionings(
+                images=images,
                 height=stage_1_output_shape.height,
                 width=stage_1_output_shape.width,
-                num_frames=int(num_frames),
                 video_encoder=video_encoder,
-                conditioning_strength=float(conditioning_strength),
-            )
-        )
-
-        transformer_stage1 = stage_1_model_ledger.transformer()
-        stage_1_sigmas = torch.Tensor(DISTILLED_SIGMA_VALUES).to(self.device)
-
-        def denoising_loop(sigmas, video_state, audio_state, current_stepper):
-            return euler_denoising_loop(
-                sigmas=sigmas,
-                video_state=video_state,
-                audio_state=audio_state,
-                stepper=current_stepper,
-                denoise_fn=simple_denoising_func(
-                    video_context=video_context,
-                    audio_context=audio_context,
-                    transformer=transformer_stage1,
-                ),
-            )
-
-        if has_audio:
-            video_state = denoise_video_only(
-                output_shape=stage_1_output_shape,
-                conditionings=stage_1_conditionings,
-                noiser=noiser,
-                sigmas=stage_1_sigmas,
-                stepper=stepper,
-                denoising_loop_fn=denoising_loop,
-                components=self.pipeline_components,
-                dtype=self.dtype,
-                device=self.device,
-                initial_audio_latent=encoded_audio_latent,
-            )
-            audio_state = None
-        else:
-            video_state, audio_state = denoise_audio_video(
-                output_shape=stage_1_output_shape,
-                conditionings=stage_1_conditionings,
-                noiser=noiser,
-                sigmas=stage_1_sigmas,
-                stepper=stepper,
-                denoising_loop_fn=denoising_loop,
-                components=self.pipeline_components,
                 dtype=self.dtype,
                 device=self.device,
             )
+            stage_1_conditionings.extend(
+                self._create_ic_conditionings(
+                    video_conditioning=video_conditioning,
+                    height=stage_1_output_shape.height,
+                    width=stage_1_output_shape.width,
+                    num_frames=int(num_frames),
+                    video_encoder=video_encoder,
+                    conditioning_strength=float(conditioning_strength),
+                )
+            )
 
-        if torch.cuda.is_available():
-            torch.cuda.synchronize()
-        cleanup_memory()
+            transformer_stage1 = stage_1_model_ledger.transformer()
+            stage_1_sigmas = torch.Tensor(DISTILLED_SIGMA_VALUES).to(self.device)
 
-        upscaled_video_latent = upsample_video(
-            latent=video_state.latent[:1],
-            video_encoder=video_encoder,
-            upsampler=stage_1_model_ledger.spatial_upsampler(),
-        )
-        if torch.cuda.is_available():
-            torch.cuda.synchronize()
-        cleanup_memory()
+            def denoising_loop(sigmas, video_state, audio_state, current_stepper):
+                return euler_denoising_loop(
+                    sigmas=sigmas,
+                    video_state=video_state,
+                    audio_state=audio_state,
+                    stepper=current_stepper,
+                    denoise_fn=simple_denoising_func(
+                        video_context=video_context,
+                        audio_context=audio_context,
+                        transformer=transformer_stage1,
+                    ),
+                )
 
-        if self._requires_dual_ledger:
-            del transformer_stage1, video_encoder
+            if has_audio:
+                video_state = denoise_video_only(
+                    output_shape=stage_1_output_shape,
+                    conditionings=stage_1_conditionings,
+                    noiser=noiser,
+                    sigmas=stage_1_sigmas,
+                    stepper=stepper,
+                    denoising_loop_fn=denoising_loop,
+                    components=self.pipeline_components,
+                    dtype=self.dtype,
+                    device=self.device,
+                    initial_audio_latent=encoded_audio_latent,
+                )
+                audio_state = None
+            else:
+                video_state, audio_state = denoise_audio_video(
+                    output_shape=stage_1_output_shape,
+                    conditionings=stage_1_conditionings,
+                    noiser=noiser,
+                    sigmas=stage_1_sigmas,
+                    stepper=stepper,
+                    denoising_loop_fn=denoising_loop,
+                    components=self.pipeline_components,
+                    dtype=self.dtype,
+                    device=self.device,
+                )
+
             if torch.cuda.is_available():
                 torch.cuda.synchronize()
             cleanup_memory()
-            self._drop_stage_1_model_ledger()
-            stage_2_model_ledger = self._ensure_stage_2_model_ledger()
-            video_encoder = stage_2_model_ledger.video_encoder()
-            transformer_stage2 = stage_2_model_ledger.transformer()
-        else:
-            stage_2_model_ledger = stage_1_model_ledger
-            transformer_stage2 = stage_2_model_ledger.transformer()
 
-        stage_2_sigmas = torch.Tensor(STAGE_2_DISTILLED_SIGMA_VALUES).to(self.device)
-
-        def denoising_loop_stage2(sigmas, video_state, audio_state, current_stepper):
-            return euler_denoising_loop(
-                sigmas=sigmas,
-                video_state=video_state,
-                audio_state=audio_state,
-                stepper=current_stepper,
-                denoise_fn=simple_denoising_func(
-                    video_context=video_context,
-                    audio_context=audio_context,
-                    transformer=transformer_stage2,
-                ),
+            upscaled_video_latent = upsample_video(
+                latent=video_state.latent[:1],
+                video_encoder=video_encoder,
+                upsampler=stage_1_model_ledger.spatial_upsampler(),
             )
+            if torch.cuda.is_available():
+                torch.cuda.synchronize()
+            cleanup_memory()
 
-        stage_2_output_shape = VideoPixelShape(
-            batch=1,
-            frames=int(num_frames),
-            width=int(width),
-            height=int(height),
-            fps=float(frame_rate),
-        )
-        stage_2_conditionings = combined_image_conditionings(
-            images=images,
-            height=stage_2_output_shape.height,
-            width=stage_2_output_shape.width,
-            video_encoder=video_encoder,
-            dtype=self.dtype,
-            device=self.device,
-        )
+            if self._requires_dual_ledger:
+                del transformer_stage1, video_encoder
+                if torch.cuda.is_available():
+                    torch.cuda.synchronize()
+                cleanup_memory()
+                self._drop_stage_1_model_ledger()
+                stage_2_model_ledger = self._ensure_stage_2_model_ledger()
+                video_encoder = stage_2_model_ledger.video_encoder()
+                transformer_stage2 = stage_2_model_ledger.transformer()
+            else:
+                stage_2_model_ledger = stage_1_model_ledger
+                transformer_stage2 = stage_2_model_ledger.transformer()
 
-        if has_audio:
-            video_state = denoise_video_only(
-                output_shape=stage_2_output_shape,
-                conditionings=stage_2_conditionings,
-                noiser=noiser,
-                sigmas=stage_2_sigmas,
-                stepper=stepper,
-                denoising_loop_fn=denoising_loop_stage2,
-                components=self.pipeline_components,
+            stage_2_sigmas = torch.Tensor(STAGE_2_DISTILLED_SIGMA_VALUES).to(self.device)
+
+            def denoising_loop_stage2(sigmas, video_state, audio_state, current_stepper):
+                return euler_denoising_loop(
+                    sigmas=sigmas,
+                    video_state=video_state,
+                    audio_state=audio_state,
+                    stepper=current_stepper,
+                    denoise_fn=simple_denoising_func(
+                        video_context=video_context,
+                        audio_context=audio_context,
+                        transformer=transformer_stage2,
+                    ),
+                )
+
+            stage_2_output_shape = VideoPixelShape(
+                batch=1,
+                frames=int(num_frames),
+                width=int(width),
+                height=int(height),
+                fps=float(frame_rate),
+            )
+            stage_2_conditionings = combined_image_conditionings(
+                images=images,
+                height=stage_2_output_shape.height,
+                width=stage_2_output_shape.width,
+                video_encoder=video_encoder,
                 dtype=self.dtype,
                 device=self.device,
-                noise_scale=stage_2_sigmas[0],
-                initial_video_latent=upscaled_video_latent,
-                initial_audio_latent=encoded_audio_latent,
-            )
-            audio_state = None
-        else:
-            video_state, audio_state = denoise_audio_video(
-                output_shape=stage_2_output_shape,
-                conditionings=stage_2_conditionings,
-                noiser=noiser,
-                sigmas=stage_2_sigmas,
-                stepper=stepper,
-                denoising_loop_fn=denoising_loop_stage2,
-                components=self.pipeline_components,
-                dtype=self.dtype,
-                device=self.device,
-                noise_scale=stage_2_sigmas[0],
-                initial_video_latent=upscaled_video_latent,
-                initial_audio_latent=audio_state.latent,
             )
 
-        if torch.cuda.is_available():
-            torch.cuda.synchronize()
-        if self._requires_dual_ledger:
-            del transformer_stage2, video_encoder
-        else:
-            del transformer_stage1, transformer_stage2, video_encoder
-        cleanup_memory()
+            if has_audio:
+                video_state = denoise_video_only(
+                    output_shape=stage_2_output_shape,
+                    conditionings=stage_2_conditionings,
+                    noiser=noiser,
+                    sigmas=stage_2_sigmas,
+                    stepper=stepper,
+                    denoising_loop_fn=denoising_loop_stage2,
+                    components=self.pipeline_components,
+                    dtype=self.dtype,
+                    device=self.device,
+                    noise_scale=stage_2_sigmas[0],
+                    initial_video_latent=upscaled_video_latent,
+                    initial_audio_latent=encoded_audio_latent,
+                )
+                audio_state = None
+            else:
+                video_state, audio_state = denoise_audio_video(
+                    output_shape=stage_2_output_shape,
+                    conditionings=stage_2_conditionings,
+                    noiser=noiser,
+                    sigmas=stage_2_sigmas,
+                    stepper=stepper,
+                    denoising_loop_fn=denoising_loop_stage2,
+                    components=self.pipeline_components,
+                    dtype=self.dtype,
+                    device=self.device,
+                    noise_scale=stage_2_sigmas[0],
+                    initial_video_latent=upscaled_video_latent,
+                    initial_audio_latent=audio_state.latent,
+                )
 
-        decoded_video = vae_decode_video(
-            video_state.latent,
-            stage_2_model_ledger.video_decoder(),
-            TilingConfig.default(),
-            generator,
-        )
-        if has_audio:
-            output_audio = decoded_audio_for_output
-        else:
-            output_audio = vae_decode_audio(
-                audio_state.latent,
-                stage_2_model_ledger.audio_decoder(),
-                stage_2_model_ledger.vocoder(),
+            if torch.cuda.is_available():
+                torch.cuda.synchronize()
+            if self._requires_dual_ledger:
+                del transformer_stage2, video_encoder
+            else:
+                del transformer_stage1, transformer_stage2, video_encoder
+            cleanup_memory()
+
+            decoded_video = vae_decode_video(
+                video_state.latent,
+                stage_2_model_ledger.video_decoder(),
+                TilingConfig.default(),
+                generator,
             )
-        if self._requires_dual_ledger:
-            self._drop_stage_2_model_ledger()
-        return decoded_video, output_audio
+            if has_audio:
+                output_audio = decoded_audio_for_output
+            else:
+                output_audio = vae_decode_audio(
+                    audio_state.latent,
+                    stage_2_model_ledger.audio_decoder(),
+                    stage_2_model_ledger.vocoder(),
+                )
+            if self._requires_dual_ledger:
+                self._drop_stage_2_model_ledger()
+            return decoded_video, output_audio
 
 
 def now_utc() -> datetime:
@@ -1562,6 +1567,14 @@ def _build_sync_fallback_attempts(
     # Fallback 2: more conservative emergency profile.
     fb2_w, fb2_h = _scale_resolution_to_max_pixels(primary_w, primary_h, 640 * 384)
     _append(fb2_w, fb2_h, min(primary_f, 49), "oom_fallback_conservative")
+
+    # Fallback 3: low-memory profile for serverless workers.
+    fb3_w, fb3_h = _scale_resolution_to_max_pixels(primary_w, primary_h, 512 * 320)
+    _append(fb3_w, fb3_h, min(primary_f, 33), "oom_fallback_lowmem")
+
+    # Fallback 4: emergency profile to prefer completion over failure.
+    fb4_w, fb4_h = _scale_resolution_to_max_pixels(primary_w, primary_h, 384 * 256)
+    _append(fb4_w, fb4_h, min(primary_f, 25), "oom_fallback_minimal")
 
     return attempts
 
