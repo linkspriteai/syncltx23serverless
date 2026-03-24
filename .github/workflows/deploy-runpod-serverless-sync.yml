@@ -19,6 +19,10 @@ on:
         description: Idle timeout seconds before scale-down
         required: true
         default: "1"
+      template_id:
+        description: Optional existing Runpod template id (skip GraphQL upsert)
+        required: false
+        default: ""
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
@@ -91,6 +95,8 @@ jobs:
           RUNPOD_IMAGE=${{ needs.build-image.outputs.image }}
           RUNPOD_TEMPLATE_NAME=ltx23-sync-serverless-h200
           RUNPOD_ENDPOINT_NAME=ltx23-sync-serverless-h200
+          RUNPOD_TEMPLATE_ID=${{ inputs.template_id }}
+          RUNPOD_SKIP_TEMPLATE_UPSERT=${{ inputs.template_id != '' && 'true' || 'false' }}
           RUNPOD_GPU_TYPE="${{ inputs.gpu_type }}"
           RUNPOD_GPU_COUNT=1
           RUNPOD_WORKERS_MIN=${{ inputs.workers_min }}

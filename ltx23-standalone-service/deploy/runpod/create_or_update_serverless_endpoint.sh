@@ -48,6 +48,7 @@ RUNPOD_COMPUTE_TYPE=${RUNPOD_COMPUTE_TYPE:-GPU}
 RUNPOD_TEMPLATE_CATEGORY=${RUNPOD_TEMPLATE_CATEGORY:-NVIDIA}
 RUNPOD_TEMPLATE_README=${RUNPOD_TEMPLATE_README:-LTX23 sync AV serverless worker}
 RUNPOD_DRY_RUN=${RUNPOD_DRY_RUN:-false}
+RUNPOD_SKIP_TEMPLATE_UPSERT=${RUNPOD_SKIP_TEMPLATE_UPSERT:-false}
 
 api_call() {
   local method=$1
@@ -448,17 +449,25 @@ if [[ "$RUNPOD_DRY_RUN" == "true" ]]; then
 fi
 
 TEMPLATE_ID=${RUNPOD_TEMPLATE_ID:-}
-if [[ -z "${TEMPLATE_ID}" ]]; then
-  TEMPLATES_JSON=$(api_call GET /templates)
-  TEMPLATE_ID=$(find_id_by_name "$TEMPLATES_JSON" "$RUNPOD_TEMPLATE_NAME")
-fi
-
-if [[ -z "${TEMPLATE_ID}" ]]; then
-  TEMPLATE_ID=$(graphql_save_template "")
-  echo "template created: $TEMPLATE_ID"
+if [[ "$RUNPOD_SKIP_TEMPLATE_UPSERT" == "true" ]]; then
+  if [[ -z "${TEMPLATE_ID}" ]]; then
+    echo "RUNPOD_SKIP_TEMPLATE_UPSERT=true but RUNPOD_TEMPLATE_ID is empty" >&2
+    exit 1
+  fi
+  echo "template upsert skipped, using RUNPOD_TEMPLATE_ID=$TEMPLATE_ID"
 else
-  TEMPLATE_ID=$(graphql_save_template "$TEMPLATE_ID")
-  echo "template updated: $TEMPLATE_ID"
+  if [[ -z "${TEMPLATE_ID}" ]]; then
+    TEMPLATES_JSON=$(api_call GET /templates)
+    TEMPLATE_ID=$(find_id_by_name "$TEMPLATES_JSON" "$RUNPOD_TEMPLATE_NAME")
+  fi
+
+  if [[ -z "${TEMPLATE_ID}" ]]; then
+    TEMPLATE_ID=$(graphql_save_template "")
+    echo "template created: $TEMPLATE_ID"
+  else
+    TEMPLATE_ID=$(graphql_save_template "$TEMPLATE_ID")
+    echo "template updated: $TEMPLATE_ID"
+  fi
 fi
 
 ENDPOINT_ID=${RUNPOD_ENDPOINT_ID:-}

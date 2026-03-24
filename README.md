@@ -13,10 +13,10 @@ Runpod serverless deployment repo for LTX23 sync AV generation.
 - `HF_TOKEN`
 - `LTX_SERVICE_API_KEY`
 - `RUNPOD_CONTAINER_REGISTRY_AUTH_ID` (optional, required for private GHCR image pull)
+- `RUNPOD_TEMPLATE_ID` (optional fallback if GraphQL template upsert is blocked)
 
 ## Service code
 
 - `ltx23-standalone-service/backend/app/serverless.py` (Runpod handler)
 - `ltx23-standalone-service/infra/docker/Dockerfile.serverless`
 - `ltx23-standalone-service/deploy/runpod/create_or_update_serverless_endpoint.sh`
-
